@@ -416,12 +416,16 @@ _PATH_MISSING = object()
 
 
 def _walk_call_data_path(call_execution, path):
-    """Walk a dotted path against CallExecution attrs / JSON payloads at any depth.
+    """Walk a dotted path against a CallExecution attr root at any depth.
 
-    Accepts an optional leading `call.` segment. Returns `_PATH_MISSING` if the
-    head is unrecognised (so callers fall through to the mismatch error); a
-    possibly-None leaf otherwise.
+    Peels an optional `call.` prefix, resolves the head against the model
+    (returning `_PATH_MISSING` if unrecognised so callers fall through to
+    the mismatch error), then delegates JSON payload traversal (dicts,
+    list indices) to `tracer.utils.eval._walk_dotted_path` for parity with
+    the tracer eval-task resolver.
     """
+    from tracer.utils.eval import _walk_dotted_path
+
     if not isinstance(path, str) or "." not in path:
         return _PATH_MISSING
     parts = path.split(".")
@@ -433,21 +437,9 @@ def _walk_call_data_path(call_execution, path):
     if not hasattr(call_execution, head):
         return _PATH_MISSING
     current = getattr(call_execution, head)
-    for part in rest:
-        if current is None:
-            return None
-        if isinstance(current, dict):
-            current = current.get(part)
-        elif isinstance(current, list):
-            try:
-                current = current[int(part)]
-            except (ValueError, IndexError):
-                return None
-        elif hasattr(current, part):
-            current = getattr(current, part)
-        else:
-            return None
-    return current
+    if not rest:
+        return current
+    return _walk_dotted_path(current, ".".join(rest))
 
 
 # Runtime keys built by `_build_transcript_data` (not on the CallExecution
