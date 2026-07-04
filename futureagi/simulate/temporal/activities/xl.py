@@ -464,20 +464,12 @@ def _build_simulation_context_map(call_execution, agent_version):
     # flattened keys below (simulation_*, agent_*, persona_*, prompt_*)
     # match the explicit flattening block in the frontend, not the raw
     # serializer field names.
-    # Chat metrics live inside conversation_metrics_data JSONB. Voice runs
-    # leave those slots empty; chat runs leave the voice metrics empty.
-    # Either way, missing values resolve to "" via _s and the eval receives
-    # the empty string rather than raising Column mapping mismatch.
     conv_metrics = call_execution.conversation_metrics_data or {}
-    response_time_seconds = (
-        call_execution.response_time_ms / 1000.0
-        if call_execution.response_time_ms is not None
-        else None
-    )
-    provider_name = None
-    provider_call_data = call_execution.provider_call_data or {}
-    if isinstance(provider_call_data, dict) and provider_call_data:
-        provider_name = next(iter(provider_call_data.keys()), None)
+    rtm = call_execution.response_time_ms
+    response_time_seconds = rtm / 1000.0 if rtm is not None else None
+    provider_data = call_execution.provider_call_data or {}
+    provider_name = next(iter(provider_data), None) if isinstance(provider_data, dict) else None
+
 
     ctx = {
         "simulation_name": _s(run_test.name),
