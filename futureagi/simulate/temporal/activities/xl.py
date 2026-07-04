@@ -413,33 +413,99 @@ CONTEXT_MAP_DOT_ALIASES = {
 
 
 _PATH_MISSING = object()
+_STEP_MISS = object()
 
 
-def _walk_call_data_path(call_execution, path):
-    """Walk a dotted path against a CallExecution attr root at any depth.
+def _step_one_segment(current, part):
+    """Take one hop through `current` matching `part`.
 
-    Peels an optional `call.` prefix, resolves the head against the model
-    (returning `_PATH_MISSING` if unrecognised so callers fall through to
-    the mismatch error), then delegates JSON payload traversal (dicts,
-    list indices) to `tracer.utils.eval._walk_dotted_path` for parity with
-    the tracer eval-task resolver.
+    Handles dict keys, list indices, and attribute access on any object,
+    with snake_case <-> camelCase coercion per segment so FE-emitted
+    `providerCallData` and BE `provider_call_data` resolve identically.
+    Returns `_STEP_MISS` if nothing matches at this level (distinct from a
+    legitimately stored None).
     """
-    from tracer.utils.eval import _walk_dotted_path
+    from tfc.utils.case import to_camel_case, to_snake_case
 
+    if current is None:
+        return _STEP_MISS
+    if isinstance(current, dict):
+        for candidate in (part, to_snake_case(part), to_camel_case(part)):
+            if candidate in current:
+                return current[candidate]
+        return _STEP_MISS
+    if isinstance(current, list):
+        try:
+            return current[int(part)]
+        except (ValueError, IndexError):
+            return _STEP_MISS
+    for candidate in (part, to_snake_case(part), to_camel_case(part)):
+        if hasattr(current, candidate):
+            return getattr(current, candidate)
+    return _STEP_MISS
+
+
+def _walk_subject_path(subjects, path):
+    """Resolve a dotted path against any registered subject root at any depth.
+
+    `subjects` maps head name (e.g. "call", "agent", "persona", "prompt",
+    "scenario", "simulation") to the root (Django model / dict / None) that
+    subject's picker vocabulary anchors on.
+
+    Resolution:
+     - Explicit prefix (`call.x`, `agent.x`, ...) picks the named subject root.
+     - Bare heads (`customer_cost_breakdown.llm.cost`, matching the FE raw
+       pass-through) fall through to stepping into each subject root in
+       registration order until one has the head as an attr / dict key.
+     - Per-hop traversal handles dicts, list indices, and attribute access,
+       with snake<->camel coercion per segment.
+
+    Returns `_PATH_MISSING` only when nothing matches (caller falls through
+    to the mismatch error); returns a possibly-None leaf otherwise.
+    """
     if not isinstance(path, str) or "." not in path:
         return _PATH_MISSING
-    parts = path.split(".")
-    if parts[0] == "call":
-        parts = parts[1:]
-        if not parts:
+    head, _, rest = path.partition(".")
+    if head in subjects:
+        current = subjects[head]
+    else:
+        current = _STEP_MISS
+        for root in subjects.values():
+            stepped = _step_one_segment(root, head)
+            if stepped is not _STEP_MISS:
+                current = stepped
+                break
+        if current is _STEP_MISS:
             return _PATH_MISSING
-    head, *rest = parts
-    if not hasattr(call_execution, head):
-        return _PATH_MISSING
-    current = getattr(call_execution, head)
     if not rest:
         return current
-    return _walk_dotted_path(current, ".".join(rest))
+    for part in rest.split("."):
+        current = _step_one_segment(current, part)
+        if current is _STEP_MISS:
+            return None
+    return current
+
+
+def _build_walker_subjects(call_execution, agent_version):
+    """Build the subject map the walker dispatches on.
+
+    Ordering (dict is insertion-ordered): `call` is tried first for bare-head
+    paths (matches the FE raw pass-through on `SimulationTestMode.jsx`),
+    then the other subjects. Any absent subject resolves to None so the
+    walker returns None for its paths instead of falling through.
+    """
+    test_execution = call_execution.test_execution
+    run_test = test_execution.run_test
+    agent_def = test_execution.agent_definition or run_test.agent_definition
+    return {
+        "call": call_execution,
+        "agent": agent_def,
+        "agent_version": agent_version,
+        "persona": run_test.simulator_agent,
+        "prompt": run_test.prompt_template,
+        "scenario": getattr(call_execution, "scenario", None),
+        "simulation": run_test,
+    }
 
 
 # Runtime keys built by `_build_transcript_data` (not on the CallExecution
@@ -662,6 +728,7 @@ def _run_single_evaluation(eval_config, call_execution, transcript_data):
         # scenario columns. The keys here MUST stay in sync with what the
         # frontend flattens; when adding a new key, add it in both places.
         context_map = _build_simulation_context_map(call_execution, agent_version)
+        subjects = _build_walker_subjects(call_execution, agent_version)
 
         # Collect column IDs that need cell lookups vs mismatch lookups
         cell_column_ids = []
@@ -762,7 +829,7 @@ def _run_single_evaluation(eval_config, call_execution, transcript_data):
                     updated_mapping[key] = ""
                     continue
                 updated_mapping[key] = cells_by_column.get(value, "")
-            elif (walked := _walk_call_data_path(call_execution, value)) is not _PATH_MISSING:
+            elif (walked := _walk_subject_path(subjects, value)) is not _PATH_MISSING:
                 updated_mapping[key] = _s(walked)
             else:
                 # Check if it's a valid column from a different scenario (mismatch)

@@ -843,3 +843,138 @@ class TestGenericDottedPathResolution:
 
         with pytest.raises(Exception):
             _run(ec, call_execution, transcript_data)
+
+
+@pytest.mark.django_db
+@patch("simulate.services.test_executor.close_old_connections", lambda: None)
+class TestSubjectDispatchRobustness:
+    """Walker resolves paths against any registered subject root (call, agent,
+    agent_version, persona, prompt, scenario, simulation), not just call.
+
+    Also verifies snake_case <-> camelCase coercion per segment so the FE
+    picker vocabulary and BE storage don't have to agree on casing.
+    """
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_agent_version_snapshot_deep_path_via_subject_prefix(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"desc": "agent_version.configuration_snapshot.description"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert (
+            mock_run.call_args.kwargs["mappings"]["desc"]
+            == "You are a helpful agent."
+        )
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_persona_bare_attribute_via_subject_prefix(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"vp": "persona.voice_provider"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["vp"] == "elevenlabs"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_simulation_bare_attribute_via_subject_prefix(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"src": "simulation.source_type"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        # source_type is a CharField on RunTest; walker returns its default.
+        assert (
+            mock_run.call_args.kwargs["mappings"]["src"]
+            == str(run_test.source_type)
+        )
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_bare_head_on_non_call_subject_falls_through_to_agent_version(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        """`configuration_snapshot.description` (no subject prefix) is not a
+        field on CallExecution or AgentDefinition — walker iterates subjects
+        and finds it on `agent_version`. Robust to FE emitting bare paths
+        anchored on any subject root."""
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"desc": "configuration_snapshot.description"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert (
+            mock_run.call_args.kwargs["mappings"]["desc"]
+            == "You are a helpful agent."
+        )
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_camelcase_head_coerces_to_snake_case_call_attribute(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        """FE-emitted `customerCostBreakdown.llm.cost` resolves the same as
+        the snake_case BE field name `customer_cost_breakdown.llm.cost`."""
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"cost": "customerCostBreakdown.llm.cost"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["cost"] == "0.039254"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_snake_case_leaf_coerces_to_camelcase_dict_key(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        """FE-emitted snake_case `customer_latency_metrics.system_metrics.overall_latency`
+        resolves against the underlying camelCase payload key `systemMetrics`."""
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "lat": "customer_latency_metrics.system_metrics.overall_latency",
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["lat"] == "850"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_snake_case_leaf_coerces_to_camelcase_at_call_prefix(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        """Same coercion under an explicit `call.` prefix."""
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "tokens": (
+                    "call.customer_cost_breakdown.llm.prompt_tokens"
+                )
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["tokens"] == "18667"
