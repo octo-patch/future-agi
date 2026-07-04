@@ -173,6 +173,20 @@ def call_execution(db, test_execution, scenario, agent_version):
             "csat_score": 4.5,
         },
         provider_call_data={"vapi": {"call_id": "vapi-12345"}},
+        customer_cost_breakdown={
+            "llm": {"cost": 0.039254, "promptTokens": 18667, "completionTokens": 240},
+            "stt": {"cost": 0.01405, "minutes": 1.83},
+            "tts": {"cost": 0.010813, "characters": 983},
+            "vapi": {"cost": 0.0},
+        },
+        customer_latency_metrics={
+            "systemMetrics": {"overall_latency": 850, "p95_latency": 1200},
+            "turnLatencies": [120, 340, 780],
+        },
+        tool_outputs=[
+            {"name": "search", "duration_ms": 210, "result": {"status": "ok"}},
+            {"name": "fetch", "duration_ms": 88, "result": {"status": "ok"}},
+        ],
     )
 
 
@@ -667,3 +681,165 @@ class TestChatMetricsResolution:
         m = mock_run.call_args.kwargs["mappings"]
         assert m["tt"] == ""
         assert m["csat"] == ""
+
+
+@pytest.mark.django_db
+@patch("simulate.services.test_executor.close_old_connections", lambda: None)
+class TestGenericDottedPathResolution:
+    """Any dotted path that names a CallExecution model attr (or the JSON
+    payloads underneath) resolves via _walk_call_data_path. Handles dicts,
+    lists (by numeric index), attribute access, and arbitrary depth. Non
+    recognisable paths fall through to the Column mapping mismatch branch.
+    """
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_deep_dict_path_customer_cost_breakdown_llm_cost(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"cost": "customer_cost_breakdown.llm.cost"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["cost"] == "0.039254"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_deep_dict_path_with_call_prefix_matches_bare(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"a": "call.customer_cost_breakdown.stt.cost", "b": "customer_cost_breakdown.stt.cost"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["a"] == m["b"] == "0.01405"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_camelcase_leaf_key_customer_cost_breakdown_llm_prompt_tokens(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"pt": "customer_cost_breakdown.llm.promptTokens"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["pt"] == "18667"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_nested_dict_path_customer_latency_system_metrics(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"lat": "customer_latency_metrics.systemMetrics.overall_latency"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["lat"] == "850"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_list_index_path_tool_outputs_by_index(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"first": "tool_outputs.0.name", "second_dur": "tool_outputs.1.duration_ms"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["first"] == "search"
+        assert m["second_dur"] == "88"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_list_index_then_dict_then_dict_deeper_path(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"status": "tool_outputs.0.result.status"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["status"] == "ok"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_arbitrary_depth_walking_stays_correct(
+        self, mock_run, run_test, transcript_data, eval_template, test_execution,
+        scenario, agent_version,
+    ):
+        deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": {"j": 42}}}}}}}}}}
+        ce = CallExecution.objects.create(
+            test_execution=test_execution,
+            scenario=scenario,
+            status=CallExecution.CallStatus.COMPLETED,
+            agent_version=agent_version,
+            simulation_call_type=CallExecution.SimulationCallType.VOICE,
+            customer_cost_breakdown=deep,
+        )
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"leaf": "customer_cost_breakdown.a.b.c.d.e.f.g.h.i.j"}, run_test, eval_template
+        )
+
+        _run(ec, ce, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["leaf"] == "42"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_missing_intermediate_key_resolves_to_empty(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"missing": "customer_cost_breakdown.no_such_key.cost"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["missing"] == ""
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_out_of_range_list_index_resolves_to_empty(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"missing": "tool_outputs.99.name"}, run_test, eval_template
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        assert mock_run.call_args.kwargs["mappings"]["missing"] == ""
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_unrecognised_head_falls_through_to_mismatch_error(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"x": "this_field_does_not_exist_on_model.foo.bar"},
+            run_test,
+            eval_template,
+        )
+
+        with pytest.raises(Exception):
+            _run(ec, call_execution, transcript_data)

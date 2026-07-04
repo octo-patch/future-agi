@@ -111,8 +111,10 @@ except ImportError:
     PhoneNumberService = None
     decide_processing_skip = None
 from simulate.temporal.activities.xl import (
+    _PATH_MISSING,
     TRANSCRIPT_DOT_ALIASES,
     _build_simulation_context_map,
+    _walk_call_data_path,
 )
 from simulate.utils.eval_summary import derive_kpi_output_type
 from simulate.utils.processing_outcomes import (
@@ -4768,6 +4770,10 @@ class TestExecutor:
                                 f"in call_execution {call_execution.id}, using empty string"
                             )
                             updated_mapping[key] = ""
+                    elif (
+                        walked := _walk_call_data_path(call_execution, value)
+                    ) is not _PATH_MISSING:
+                        updated_mapping[key] = "" if walked is None else str(walked)
                     else:
                         # Build informative error message with column, dataset, and scenario details
                         column_name = None

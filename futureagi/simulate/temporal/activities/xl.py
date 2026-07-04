@@ -412,11 +412,47 @@ CONTEXT_MAP_DOT_ALIASES = {
 }
 
 
+_PATH_MISSING = object()
+
+
+def _walk_call_data_path(call_execution, path):
+    """Walk a dotted path against CallExecution attrs / JSON payloads at any depth.
+
+    Accepts an optional leading `call.` segment. Returns `_PATH_MISSING` if the
+    head is unrecognised (so callers fall through to the mismatch error); a
+    possibly-None leaf otherwise.
+    """
+    if not isinstance(path, str) or "." not in path:
+        return _PATH_MISSING
+    parts = path.split(".")
+    if parts[0] == "call":
+        parts = parts[1:]
+        if not parts:
+            return _PATH_MISSING
+    head, *rest = parts
+    if not hasattr(call_execution, head):
+        return _PATH_MISSING
+    current = getattr(call_execution, head)
+    for part in rest:
+        if current is None:
+            return None
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif hasattr(current, part):
+            current = getattr(current, part)
+        else:
+            return None
+    return current
+
+
 # Runtime keys built by `_build_transcript_data` (not on the CallExecution
 # model). Mapping translates the dot-form a new frontend config emits into
-# the transcript_data key the resolver already knows how to look up. The
-# original underscore keys remain handled by the dedicated branches in
-# `_run_single_evaluation` for full backcompat.
+# the transcript_data key the resolver already knows how to look up.
 TRANSCRIPT_DOT_ALIASES = {
     "call.transcript": "transcript",
     "call.voice_recording": "voice_recording",
@@ -734,6 +770,8 @@ def _run_single_evaluation(eval_config, call_execution, transcript_data):
                     updated_mapping[key] = ""
                     continue
                 updated_mapping[key] = cells_by_column.get(value, "")
+            elif (walked := _walk_call_data_path(call_execution, value)) is not _PATH_MISSING:
+                updated_mapping[key] = _s(walked)
             else:
                 # Check if it's a valid column from a different scenario (mismatch)
                 column_obj = columns_by_id.get(value)
