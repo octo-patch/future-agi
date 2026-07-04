@@ -386,6 +386,29 @@ CONTEXT_MAP_DOT_ALIASES = {
     "overall_score": "call.overall_score",
     "recording_url": "call.recording_url",
     "stereo_recording_url": "call.stereo_recording_url",
+    "response_time": "call.response_time",
+    "response_time_ms": "call.response_time_ms",
+    "avg_agent_latency": "call.avg_agent_latency",
+    "avg_agent_latency_ms": "call.avg_agent_latency_ms",
+    "avg_latency_ms": "call.avg_latency_ms",
+    "avg_stop_time_after_interruption": "call.avg_stop_time_after_interruption",
+    "avg_stop_time_after_interruption_ms": "call.avg_stop_time_after_interruption_ms",
+    "user_interruption_count": "call.user_interruption_count",
+    "user_interruption_rate": "call.user_interruption_rate",
+    "user_wpm": "call.user_wpm",
+    "bot_wpm": "call.bot_wpm",
+    "talk_ratio": "call.talk_ratio",
+    "ai_interruption_count": "call.ai_interruption_count",
+    "ai_interruption_rate": "call.ai_interruption_rate",
+    "total_tokens": "call.total_tokens",
+    "input_tokens": "call.input_tokens",
+    "output_tokens": "call.output_tokens",
+    "turn_count": "call.turn_count",
+    "agent_talk_percentage": "call.agent_talk_percentage",
+    "csat_score": "call.csat_score",
+    "cost_cents": "call.cost_cents",
+    "customer_cost_cents": "call.customer_cost_cents",
+    "provider": "call.provider",
 }
 
 
@@ -441,6 +464,21 @@ def _build_simulation_context_map(call_execution, agent_version):
     # flattened keys below (simulation_*, agent_*, persona_*, prompt_*)
     # match the explicit flattening block in the frontend, not the raw
     # serializer field names.
+    # Chat metrics live inside conversation_metrics_data JSONB. Voice runs
+    # leave those slots empty; chat runs leave the voice metrics empty.
+    # Either way, missing values resolve to "" via _s and the eval receives
+    # the empty string rather than raising Column mapping mismatch.
+    conv_metrics = call_execution.conversation_metrics_data or {}
+    response_time_seconds = (
+        call_execution.response_time_ms / 1000.0
+        if call_execution.response_time_ms is not None
+        else None
+    )
+    provider_name = None
+    provider_call_data = call_execution.provider_call_data or {}
+    if isinstance(provider_call_data, dict) and provider_call_data:
+        provider_name = next(iter(provider_call_data.keys()), None)
+
     ctx = {
         "simulation_name": _s(run_test.name),
         "simulation_type": _s(run_test.source_type),
@@ -453,6 +491,33 @@ def _build_simulation_context_map(call_execution, agent_version):
         "overall_score": _s(call_execution.overall_score),
         "recording_url": _s(call_execution.recording_url),
         "stereo_recording_url": _s(call_execution.stereo_recording_url),
+        "response_time": _s(response_time_seconds),
+        "response_time_ms": _s(call_execution.response_time_ms),
+        "avg_agent_latency": _s(call_execution.avg_agent_latency_ms),
+        "avg_agent_latency_ms": _s(call_execution.avg_agent_latency_ms),
+        "avg_latency_ms": _s(conv_metrics.get("avg_latency_ms")),
+        "avg_stop_time_after_interruption": _s(
+            call_execution.avg_stop_time_after_interruption_ms
+        ),
+        "avg_stop_time_after_interruption_ms": _s(
+            call_execution.avg_stop_time_after_interruption_ms
+        ),
+        "user_interruption_count": _s(call_execution.user_interruption_count),
+        "user_interruption_rate": _s(call_execution.user_interruption_rate),
+        "user_wpm": _s(call_execution.user_wpm),
+        "bot_wpm": _s(call_execution.bot_wpm),
+        "talk_ratio": _s(call_execution.talk_ratio),
+        "ai_interruption_count": _s(call_execution.ai_interruption_count),
+        "ai_interruption_rate": _s(call_execution.ai_interruption_rate),
+        "total_tokens": _s(conv_metrics.get("total_tokens")),
+        "input_tokens": _s(conv_metrics.get("input_tokens")),
+        "output_tokens": _s(conv_metrics.get("output_tokens")),
+        "turn_count": _s(conv_metrics.get("turn_count")),
+        "agent_talk_percentage": _s(conv_metrics.get("agent_talk_percentage")),
+        "csat_score": _s(conv_metrics.get("csat_score")),
+        "cost_cents": _s(call_execution.cost_cents),
+        "customer_cost_cents": _s(call_execution.customer_cost_cents),
+        "provider": _s(provider_name),
     }
 
     if agent_def:

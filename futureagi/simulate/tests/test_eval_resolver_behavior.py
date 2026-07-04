@@ -151,6 +151,54 @@ def call_execution(db, test_execution, scenario, agent_version):
         duration_seconds=120,
         overall_score=8,
         simulation_call_type=CallExecution.SimulationCallType.VOICE,
+        response_time_ms=1500,
+        avg_agent_latency_ms=8652,
+        avg_stop_time_after_interruption_ms=400,
+        user_interruption_count=2,
+        user_interruption_rate=0.1,
+        user_wpm=120.5,
+        bot_wpm=150.2,
+        talk_ratio=0.45,
+        ai_interruption_count=1,
+        ai_interruption_rate=0.05,
+        cost_cents=250,
+        customer_cost_cents=180,
+        conversation_metrics_data={
+            "avg_latency_ms": 900.5,
+            "total_tokens": 3200,
+            "input_tokens": 1800,
+            "output_tokens": 1400,
+            "turn_count": 12,
+            "agent_talk_percentage": 55.5,
+            "csat_score": 4.5,
+        },
+        provider_call_data={"vapi": {"call_id": "vapi-12345"}},
+    )
+
+
+@pytest.fixture
+def chat_call_execution(db, test_execution, scenario, agent_version):
+    """Chat-sim shape: voice-only metrics stay null; conversation_metrics_data
+    populated."""
+    return CallExecution.objects.create(
+        test_execution=test_execution,
+        scenario=scenario,
+        status=CallExecution.CallStatus.COMPLETED,
+        agent_version=agent_version,
+        call_summary="Chat completed successfully.",
+        ended_reason="chat-finished",
+        duration_seconds=45,
+        overall_score=9,
+        simulation_call_type=CallExecution.SimulationCallType.TEXT,
+        conversation_metrics_data={
+            "avg_latency_ms": 320.0,
+            "total_tokens": 1800,
+            "input_tokens": 1100,
+            "output_tokens": 700,
+            "turn_count": 8,
+            "agent_talk_percentage": 50.0,
+            "csat_score": 4.0,
+        },
     )
 
 
@@ -392,3 +440,230 @@ class TestCallContextPropagation:
         assert ctx["call_summary"] == "Customer called about order 123."
         assert ctx["duration_seconds"] == 120
         assert ctx["overall_score"] == 8.0
+
+
+@pytest.mark.django_db
+@patch("simulate.services.test_executor.close_old_connections", lambda: None)
+class TestVoiceMetricsAndLatencyResolution:
+    """Every field the FE mapping picker surfaces via the raw-callData
+    pass-through must resolve on the BE. Verified on a voice sim where all
+    metrics fields are populated on the CallExecution row.
+    """
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_avg_agent_latency_bare_and_dot_form_resolve(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"bare": "avg_agent_latency", "dot": "call.avg_agent_latency"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["bare"] == "8652"
+        assert m["dot"] == "8652"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_response_time_ms_and_seconds_resolve(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"ms": "response_time_ms", "sec": "response_time"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["ms"] == "1500"
+        assert m["sec"] == "1.5"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_voice_interruption_and_wpm_metrics_resolve(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "uic": "user_interruption_count",
+                "uir": "user_interruption_rate",
+                "aic": "ai_interruption_count",
+                "air": "ai_interruption_rate",
+                "uw": "user_wpm",
+                "bw": "bot_wpm",
+                "tr": "talk_ratio",
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["uic"] == "2"
+        assert m["uir"] == "0.1"
+        assert m["aic"] == "1"
+        assert m["air"] == "0.05"
+        assert m["uw"] == "120.5"
+        assert m["bw"] == "150.2"
+        assert m["tr"] == "0.45"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_cost_and_provider_resolve(
+        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "cost": "cost_cents",
+                "customer_cost": "customer_cost_cents",
+                "prov": "provider",
+                "dot_prov": "call.provider",
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["cost"] == "250"
+        assert m["customer_cost"] == "180"
+        assert m["prov"] == "vapi"
+        assert m["dot_prov"] == "vapi"
+
+
+@pytest.mark.django_db
+@patch("simulate.services.test_executor.close_old_connections", lambda: None)
+class TestChatMetricsResolution:
+    """Chat metrics live inside conversation_metrics_data JSONB. Both bare
+    underscore and dot-form must resolve.
+    """
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_chat_token_and_turn_metrics_resolve_bare(
+        self,
+        mock_run,
+        run_test,
+        chat_call_execution,
+        transcript_data,
+        eval_template,
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "tt": "total_tokens",
+                "it": "input_tokens",
+                "ot": "output_tokens",
+                "tc": "turn_count",
+                "atp": "agent_talk_percentage",
+                "csat": "csat_score",
+                "lat": "avg_latency_ms",
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, chat_call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["tt"] == "1800"
+        assert m["it"] == "1100"
+        assert m["ot"] == "700"
+        assert m["tc"] == "8"
+        assert m["atp"] == "50.0"
+        assert m["csat"] == "4.0"
+        assert m["lat"] == "320.0"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_chat_metrics_resolve_dot_form(
+        self,
+        mock_run,
+        run_test,
+        chat_call_execution,
+        transcript_data,
+        eval_template,
+    ):
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "tt": "call.total_tokens",
+                "csat": "call.csat_score",
+                "lat": "call.avg_latency_ms",
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, chat_call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["tt"] == "1800"
+        assert m["csat"] == "4.0"
+        assert m["lat"] == "320.0"
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_voice_only_metrics_resolve_empty_on_chat_sim(
+        self,
+        mock_run,
+        run_test,
+        chat_call_execution,
+        transcript_data,
+        eval_template,
+    ):
+        """Chat sim leaves voice-only metrics NULL on the model. Resolver
+        should emit empty string, not raise Column mapping mismatch.
+        """
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {
+                "lat": "avg_agent_latency",
+                "uw": "user_wpm",
+                "tr": "talk_ratio",
+            },
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, chat_call_execution, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["lat"] == ""
+        assert m["uw"] == ""
+        assert m["tr"] == ""
+
+    @patch("simulate.services.test_executor.run_eval_func")
+    def test_chat_only_metrics_resolve_empty_on_voice_sim_with_no_metrics(
+        self, mock_run, run_test, transcript_data, eval_template, agent_version,
+        test_execution, scenario,
+    ):
+        """Voice sim with no conversation_metrics_data leaves chat metrics
+        empty rather than raising.
+        """
+        ce = CallExecution.objects.create(
+            test_execution=test_execution,
+            scenario=scenario,
+            phone_number="+15551230000",
+            status=CallExecution.CallStatus.COMPLETED,
+            agent_version=agent_version,
+            recording_url="s3://bucket/rec.mp3",
+            simulation_call_type=CallExecution.SimulationCallType.VOICE,
+        )
+        mock_run.return_value = _SUCCESS_STUB
+        ec = _make_eval(
+            {"tt": "total_tokens", "csat": "csat_score"},
+            run_test,
+            eval_template,
+        )
+
+        _run(ec, ce, transcript_data)
+
+        m = mock_run.call_args.kwargs["mappings"]
+        assert m["tt"] == ""
+        assert m["csat"] == ""
