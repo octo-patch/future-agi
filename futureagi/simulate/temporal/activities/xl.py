@@ -40,6 +40,7 @@ from simulate.temporal.types.activities import (
     RunToolCallEvaluationOutput,
 )
 from simulate.utils.eval_summary import derive_kpi_output_type
+from tfc.utils.case import to_camel_case, to_snake_case
 
 logger = structlog.get_logger(__name__)
 
@@ -412,21 +413,18 @@ CONTEXT_MAP_DOT_ALIASES = {
 }
 
 
-_PATH_MISSING = object()
+# Sibling of `tracer.utils.eval._walk_raw_log`. Kept local to avoid cross-
+# app coupling and to add attribute-access on Django model roots.
+PATH_MISSING = object()
 _STEP_MISS = object()
 
 
-def _step_one_segment(current, part):
-    """Take one hop through `current` matching `part`.
+def _stringify_leaf(v):
+    return "" if v is None else str(v)
 
-    Handles dict keys, list indices, and attribute access on any object,
-    with snake_case <-> camelCase coercion per segment so FE-emitted
-    `providerCallData` and BE `provider_call_data` resolve identically.
-    Returns `_STEP_MISS` if nothing matches at this level (distinct from a
-    legitimately stored None).
-    """
-    from tfc.utils.case import to_camel_case, to_snake_case
 
+def step_segment(current, part):
+    """One hop through `current`: dict key / list index / attribute, with snake<->camel coercion."""
     if current is None:
         return _STEP_MISS
     if isinstance(current, dict):
@@ -445,55 +443,33 @@ def _step_one_segment(current, part):
     return _STEP_MISS
 
 
-def _walk_subject_path(subjects, path):
-    """Resolve a dotted path against any registered subject root at any depth.
-
-    `subjects` maps head name (e.g. "call", "agent", "persona", "prompt",
-    "scenario", "simulation") to the root (Django model / dict / None) that
-    subject's picker vocabulary anchors on.
-
-    Resolution:
-     - Explicit prefix (`call.x`, `agent.x`, ...) picks the named subject root.
-     - Bare heads (`customer_cost_breakdown.llm.cost`, matching the FE raw
-       pass-through) fall through to stepping into each subject root in
-       registration order until one has the head as an attr / dict key.
-     - Per-hop traversal handles dicts, list indices, and attribute access,
-       with snake<->camel coercion per segment.
-
-    Returns `_PATH_MISSING` only when nothing matches (caller falls through
-    to the mismatch error); returns a possibly-None leaf otherwise.
-    """
+def walk_subject_path(subjects, path):
+    """Resolve a dotted path against any registered subject root at any depth."""
     if not isinstance(path, str) or "." not in path:
-        return _PATH_MISSING
+        return PATH_MISSING
     head, _, rest = path.partition(".")
     if head in subjects:
         current = subjects[head]
     else:
         current = _STEP_MISS
         for root in subjects.values():
-            stepped = _step_one_segment(root, head)
+            stepped = step_segment(root, head)
             if stepped is not _STEP_MISS:
                 current = stepped
                 break
         if current is _STEP_MISS:
-            return _PATH_MISSING
+            return PATH_MISSING
     if not rest:
         return current
     for part in rest.split("."):
-        current = _step_one_segment(current, part)
+        current = step_segment(current, part)
         if current is _STEP_MISS:
             return None
     return current
 
 
-def _build_walker_subjects(call_execution, agent_version):
-    """Build the subject map the walker dispatches on.
-
-    Ordering (dict is insertion-ordered): `call` is tried first for bare-head
-    paths (matches the FE raw pass-through on `SimulationTestMode.jsx`),
-    then the other subjects. Any absent subject resolves to None so the
-    walker returns None for its paths instead of falling through.
-    """
+def build_subject_map(call_execution, agent_version):
+    """Subject roots the walker dispatches on. Order is load-bearing: `call` is tried first for bare-head paths."""
     test_execution = call_execution.test_execution
     run_test = test_execution.run_test
     agent_def = test_execution.agent_definition or run_test.agent_definition
@@ -563,7 +539,6 @@ def _build_simulation_context_map(call_execution, agent_version):
     response_time_seconds = rtm / 1000.0 if rtm is not None else None
     provider_data = call_execution.provider_call_data or {}
     provider_name = next(iter(provider_data), None) if isinstance(provider_data, dict) else None
-
 
     ctx = {
         "simulation_name": _s(run_test.name),
@@ -728,21 +703,25 @@ def _run_single_evaluation(eval_config, call_execution, transcript_data):
         # scenario columns. The keys here MUST stay in sync with what the
         # frontend flattens; when adding a new key, add it in both places.
         context_map = _build_simulation_context_map(call_execution, agent_version)
-        subjects = _build_walker_subjects(call_execution, agent_version)
+        subjects = build_subject_map(call_execution, agent_version)
 
-        # Collect column IDs that need cell lookups vs mismatch lookups
+        # Collect column IDs that need cell lookups vs mismatch lookups.
+        # Walker-resolvable paths are held out of mismatch prefetch: the
+        # prefetch casts to UUID and any dotted / non-UUID walker path
+        # would crash the batch query before the resolver reaches it.
         cell_column_ids = []
         mismatch_column_ids = []
         for value in mapping.values():
             if not value or value == "" or value in known_keys:
                 continue
             if value in TRANSCRIPT_DOT_ALIASES:
-                # Dot-form alias for transcript_data / snapshot keys.
                 continue
             if value in context_map:
                 continue
             if value in scenario_column_order_set:
                 cell_column_ids.append(value)
+            elif walk_subject_path(subjects, value) is not PATH_MISSING:
+                continue
             else:
                 mismatch_column_ids.append(value)
 
@@ -829,8 +808,8 @@ def _run_single_evaluation(eval_config, call_execution, transcript_data):
                     updated_mapping[key] = ""
                     continue
                 updated_mapping[key] = cells_by_column.get(value, "")
-            elif (walked := _walk_subject_path(subjects, value)) is not _PATH_MISSING:
-                updated_mapping[key] = _s(walked)
+            elif (walked := walk_subject_path(subjects, value)) is not PATH_MISSING:
+                updated_mapping[key] = _stringify_leaf(walked)
             else:
                 # Check if it's a valid column from a different scenario (mismatch)
                 column_obj = columns_by_id.get(value)

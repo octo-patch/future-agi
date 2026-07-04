@@ -111,11 +111,12 @@ except ImportError:
     PhoneNumberService = None
     decide_processing_skip = None
 from simulate.temporal.activities.xl import (
-    _PATH_MISSING,
+    PATH_MISSING,
     TRANSCRIPT_DOT_ALIASES,
     _build_simulation_context_map,
-    _build_walker_subjects,
-    _walk_subject_path,
+    _stringify_leaf,
+    build_subject_map,
+    walk_subject_path,
 )
 from simulate.utils.eval_summary import derive_kpi_output_type
 from simulate.utils.processing_outcomes import (
@@ -4694,7 +4695,7 @@ class TestExecutor:
                     )
 
             context_map = _build_simulation_context_map(call_execution, agent_version)
-            subjects = _build_walker_subjects(call_execution, agent_version)
+            subjects = build_subject_map(call_execution, agent_version)
 
             logger.info(
                 f"Eval mapping validation for call_execution {call_execution.id}: "
@@ -4773,9 +4774,9 @@ class TestExecutor:
                             )
                             updated_mapping[key] = ""
                     elif (
-                        walked := _walk_subject_path(subjects, value)
-                    ) is not _PATH_MISSING:
-                        updated_mapping[key] = "" if walked is None else str(walked)
+                        walked := walk_subject_path(subjects, value)
+                    ) is not PATH_MISSING:
+                        updated_mapping[key] = _stringify_leaf(walked)
                     else:
                         # Build informative error message with column, dataset, and scenario details
                         column_name = None

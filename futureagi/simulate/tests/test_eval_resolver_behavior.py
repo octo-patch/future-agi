@@ -254,6 +254,15 @@ def _run(eval_config, call_execution, transcript_data):
     )
 
 
+def _run_xl(eval_config, call_execution, transcript_data):
+    """Exercise the temporal-activity path (`xl._run_single_evaluation`) so
+    resolver-branch regressions on that side aren't invisible to the
+    test_executor path suite."""
+    from simulate.temporal.activities.xl import _run_single_evaluation
+
+    return _run_single_evaluation(eval_config, call_execution, transcript_data)
+
+
 _SUCCESS_STUB = {"output": "8", "reason": "ok", "output_type": "score"}
 
 
@@ -686,10 +695,9 @@ class TestChatMetricsResolution:
 @pytest.mark.django_db
 @patch("simulate.services.test_executor.close_old_connections", lambda: None)
 class TestGenericDottedPathResolution:
-    """Any dotted path that names a CallExecution model attr (or the JSON
-    payloads underneath) resolves via _walk_call_data_path. Handles dicts,
-    lists (by numeric index), attribute access, and arbitrary depth. Non
-    recognisable paths fall through to the Column mapping mismatch branch.
+    """Any dotted path that names a CallExecution attr (or the JSON payloads
+    underneath) resolves through `walk_subject_path` at arbitrary depth.
+    Unrecognised heads fall through to the Column mapping mismatch branch.
     """
 
     @patch("simulate.services.test_executor.run_eval_func")
@@ -945,11 +953,13 @@ class TestSubjectDispatchRobustness:
         self, mock_run, run_test, call_execution, transcript_data, eval_template
     ):
         """FE-emitted snake_case `customer_latency_metrics.system_metrics.overall_latency`
-        resolves against the underlying camelCase payload key `systemMetrics`."""
+        resolves against the underlying camelCase payload key `systemMetrics`,
+        and the same coercion holds under an explicit `call.` prefix + camelCase leaf."""
         mock_run.return_value = _SUCCESS_STUB
         ec = _make_eval(
             {
                 "lat": "customer_latency_metrics.system_metrics.overall_latency",
+                "tokens": "call.customer_cost_breakdown.llm.prompt_tokens",
             },
             run_test,
             eval_template,
@@ -957,24 +967,25 @@ class TestSubjectDispatchRobustness:
 
         _run(ec, call_execution, transcript_data)
 
-        assert mock_run.call_args.kwargs["mappings"]["lat"] == "850"
+        mappings = mock_run.call_args.kwargs["mappings"]
+        assert mappings["lat"] == "850"
+        assert mappings["tokens"] == "18667"
 
-    @patch("simulate.services.test_executor.run_eval_func")
-    def test_snake_case_leaf_coerces_to_camelcase_at_call_prefix(
-        self, mock_run, run_test, call_execution, transcript_data, eval_template
+    @patch("simulate.temporal.activities.xl.close_old_connections", lambda: None)
+    def test_walker_branch_runs_on_xl_temporal_activity_path(
+        self, run_test, call_execution, transcript_data, eval_template
     ):
-        """Same coercion under an explicit `call.` prefix."""
-        mock_run.return_value = _SUCCESS_STUB
-        ec = _make_eval(
-            {
-                "tokens": (
-                    "call.customer_cost_breakdown.llm.prompt_tokens"
-                )
-            },
-            run_test,
-            eval_template,
-        )
+        """Regression guard: the walker branch in xl.py's `_run_single_evaluation`
+        must not reference identifiers scoped to `_build_simulation_context_map`.
+        The wider test suite exercises the test_executor path exclusively, so a
+        NameError on this branch would be invisible without this test."""
+        from model_hub.views.utils import evals as evals_mod
 
-        _run(ec, call_execution, transcript_data)
+        with patch.object(evals_mod, "run_eval_func", return_value=_SUCCESS_STUB):
+            ec = _make_eval(
+                {"cost": "customer_cost_breakdown.llm.cost"},
+                run_test,
+                eval_template,
+            )
 
-        assert mock_run.call_args.kwargs["mappings"]["tokens"] == "18667"
+            _run_xl(ec, call_execution, transcript_data)
