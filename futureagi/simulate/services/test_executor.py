@@ -115,7 +115,6 @@ from simulate.temporal.activities.xl import (
     TRANSCRIPT_DOT_ALIASES,
     _build_simulation_context_map,
     _stringify_leaf,
-    build_subject_map,
     walk_subject_path,
 )
 from simulate.utils.eval_summary import derive_kpi_output_type
@@ -4694,8 +4693,9 @@ class TestExecutor:
                         f"Using fallback agent_version (latest_version) for call_execution {call_execution.id}"
                     )
 
-            context_map = _build_simulation_context_map(call_execution, agent_version)
-            subjects = build_subject_map(call_execution, agent_version)
+            context_map, subjects = _build_simulation_context_map(
+                call_execution, agent_version
+            )
 
             logger.info(
                 f"Eval mapping validation for call_execution {call_execution.id}: "

@@ -468,22 +468,6 @@ def walk_subject_path(subjects, path):
     return current
 
 
-def build_subject_map(call_execution, agent_version):
-    """Subject roots the walker dispatches on. Order is load-bearing: `call` is tried first for bare-head paths."""
-    test_execution = call_execution.test_execution
-    run_test = test_execution.run_test
-    agent_def = test_execution.agent_definition or run_test.agent_definition
-    return {
-        "call": call_execution,
-        "agent": agent_def,
-        "agent_version": agent_version,
-        "persona": run_test.simulator_agent,
-        "prompt": run_test.prompt_template,
-        "scenario": getattr(call_execution, "scenario", None),
-        "simulation": run_test,
-    }
-
-
 # Runtime keys built by `_build_transcript_data` (not on the CallExecution
 # model). Mapping translates the dot-form a new frontend config emits into
 # the transcript_data key the resolver already knows how to look up.
@@ -503,16 +487,21 @@ TRANSCRIPT_DOT_ALIASES = {
 
 def _build_simulation_context_map(call_execution, agent_version):
     """
-    Build a flat {key: string} map of simulation context that eval configs
-    can bind variables to. The key set is the contract with the frontend
-    variable-mapping dropdown in `SimulationTestMode.jsx`; only keys present
-    here are resolvable at run time. All FK access relies on the
-    select_related in `run_simulate_evaluations` — do NOT add fields here
-    without also prefetching them there.
+    Return (ctx, subjects) resolved from a single FK-chain walk.
 
-    Each logical field is exposed under BOTH its legacy underscore key
-    (`agent_name`) and its dot-hierarchy key (`agent.name`) so pre-migration
-    saved eval configs and new dot-notation configs both resolve.
+    `ctx` is the flat {key: string} map of simulation context that eval
+    configs can bind variables to. The key set is the contract with the
+    frontend variable-mapping dropdown in `SimulationTestMode.jsx`; only
+    keys present here are resolvable via the fast-path lookup. All FK
+    access relies on the select_related in `run_simulate_evaluations` -
+    do NOT add fields here without also prefetching them there.
+
+    `subjects` is the head -> subject-root map the walker dispatches on
+    for arbitrary-depth paths that the flat ctx does not cover.
+
+    Each logical field in ctx is exposed under BOTH its legacy underscore
+    key (`agent_name`) and its dot-hierarchy key (`agent.name`) so
+    pre-migration configs and new dot-notation configs both resolve.
     """
     test_execution = call_execution.test_execution
     run_test = test_execution.run_test
@@ -640,7 +629,19 @@ def _build_simulation_context_map(call_execution, agent_version):
         if underscore_key in ctx:
             ctx[dot_key] = ctx[underscore_key]
 
-    return ctx
+    # Subject roots the walker dispatches on. Order is load-bearing:
+    # `call` is tried first for bare-head paths (matches the FE raw
+    # pass-through in `SimulationTestMode.jsx`).
+    subjects = {
+        "call": call_execution,
+        "agent": agent_def,
+        "agent_version": agent_version,
+        "persona": simulator_agent,
+        "prompt": prompt_template,
+        "scenario": scenario,
+        "simulation": run_test,
+    }
+    return ctx, subjects
 
 
 def _run_single_evaluation(eval_config, call_execution, transcript_data):
@@ -702,8 +703,9 @@ def _run_single_evaluation(eval_config, call_execution, transcript_data):
         # persona, prompt, and call metadata — not just transcripts and
         # scenario columns. The keys here MUST stay in sync with what the
         # frontend flattens; when adding a new key, add it in both places.
-        context_map = _build_simulation_context_map(call_execution, agent_version)
-        subjects = build_subject_map(call_execution, agent_version)
+        context_map, subjects = _build_simulation_context_map(
+            call_execution, agent_version
+        )
 
         # Collect column IDs that need cell lookups vs mismatch lookups.
         # Walker-resolvable paths are held out of mismatch prefetch: the
